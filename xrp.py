@@ -12,7 +12,7 @@ from machine import Pin, time_pulse_us
 from RadarFollower import RadarFollower
 from ObstacleAvoider import ObstacleAvoider
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 i2c = machine.I2C(0, sda=machine.Pin(4), scl=machine.Pin(5), freq=400000)
 #i2c = I2C(1, scl=Pin(39), sda=Pin(38), freq=400000)
@@ -226,6 +226,7 @@ def main():
     imu_mode = False
     radar_mode = False
     radar_multi = True
+    log_mode = False  # new log display toggle
     log_messages = []
     add_log(f"XRP System v{VERSION} starting")
     try:
@@ -243,60 +244,69 @@ def main():
     except: pass
     set_led_green()  # System running indicator
 
-    menus = ["STRAIGHT", "ARC", "POINT", "SWING", "CIRCLE", "SQUARE", "POLYGON", "TEST", "SET LIMIT", "HLK-LD2450", "RADAR MODE", "FOLLOW", "GO 5M", "IMU"]
+    menus = ["STRAIGHT", "ARC", "POINT", "SWING", "CIRCLE", "SQUARE", "POLYGON", "TEST", "SET LIMIT", "HLK-LD2450", "RADAR MODE", "FOLLOW", "GO 5M", "IMU", "LOG"]
 
     while True:
         pos = seesaw_device.get_position()
-        count = (pos) % 14
+        count = (pos) % 15
         
-        display.fill(0)
-        display.text("XRP DASHBOARD", 15, 4, 1)
-        display.hline(0, 14, 128, 1)
-        display.text(f"MODE: {menus[count]}", 5, 28, 1)
-        display.text(f"BATT: {get_real_volts():.2f}V", 5, 44, 1)
-        display.text(f"RADAR: {'Multi' if radar_multi else 'Single'}", 5, 54, 1)  # moved down
-        
-        # Current distance readout
-        dist = get_radar_distance()
-        print("Calculated dist:", dist)
-        if dist >= 65500:
-            display.text("DIST: NO SENSOR", 5, 64, 1)  # moved down
+        if log_mode:
+            # Show full log on screen
+            display.fill(0)
+            y = 0
+            for msg in log_messages[-15:]:  # show last 15 entries
+                display.text(msg[:20], 5, y, 1)
+                y += 9
         else:
-            display.text(f"DIST: {int(dist)}cm", 5, 64, 1)  # moved down
-        
-        # === Distance bar + IMU / Radar + LOG ===
-        if imu_mode or radar_mode:
-            bar_y = 75          # higher when active
-            data_y = 85         # data start
-            log_y = 115         # log below data (room for 2 lines)
-        else:
-            bar_y = 90          # normal
-            data_y = 0          # no data
-            log_y = 105         # log right below bar
-        
-        draw_distance_bar(dist, bar_y)
-        
-        if imu_mode:
-            accel = [x / 1000.0 for x in imu.get_acc_rates()]
-            gyro  = [x / 1000.0 for x in imu.get_gyro_rates()]
-            heading = imu.get_heading()
-            display.text(f"A: {accel[0]:.1f} {accel[1]:.1f} {accel[2]:.1f} g", 5, data_y, 1)
-            display.text(f"G: {gyro[0]:.1f} {gyro[1]:.1f} {gyro[2]:.1f} d/s", 5, data_y + 9, 1)
-            display.text(f"H: {heading:.1f} deg", 5, data_y + 18, 1)
-        
-        if radar_mode:
-            report = hlk_radar.parse_radar_report()
-            if report:
-                num_targets = 3 if radar_multi else 1
-                for i in range(0, num_targets * 4, 4):
-                    x, y, speed, res = report[i:i+4]
-                    display.text(f"T{(i//4)+1}: X{x:3.0f} Y{y:3.0f} S{speed:2.0f} R{res:2.0f}", 5, data_y + (i//4)*9, 1)
+            # Normal dashboard display
+            display.fill(0)
+            display.text("XRP DASHBOARD", 15, 4, 1)
+            display.hline(0, 14, 128, 1)
+            display.text(f"MODE: {menus[count]}", 5, 28, 1)
+            display.text(f"BATT: {get_real_volts():.2f}V", 5, 44, 1)
+            display.text(f"RADAR: {'Multi' if radar_multi else 'Single'}", 5, 54, 1)  # moved down
+            
+            # Current distance readout
+            dist = get_radar_distance()
+            print("Calculated dist:", dist)
+            if dist >= 65500:
+                display.text("DIST: NO SENSOR", 5, 64, 1)  # moved down
             else:
-                display.text("NO TARGETS", 5, data_y, 1)
-        
-        # === Rolling Log (always shown, below everything) ===
-        for idx, msg in enumerate(log_messages):
-            display.text(msg[:20], 5, log_y + idx * 9, 1)  # truncate to 20 chars to fit screen
+                display.text(f"DIST: {int(dist)}cm", 5, 64, 1)  # moved down
+            
+            # === Distance bar + IMU / Radar + LOG ===
+            if imu_mode or radar_mode:
+                bar_y = 75          # higher when active
+                data_y = 85         # data start
+                log_y = 115         # log below data (room for 2 lines)
+            else:
+                bar_y = 90          # normal
+                data_y = 0          # no data
+                log_y = 105         # log right below bar
+            
+            draw_distance_bar(dist, bar_y)
+            
+            if imu_mode:
+                accel = [x / 1000.0 for x in imu.get_acc_rates()]
+                gyro  = [x / 1000.0 for x in imu.get_gyro_rates()]
+                heading = imu.get_heading()
+                display.text(f"A: {accel[0]:.1f} {accel[1]:.1f} {accel[2]:.1f} g", 5, data_y, 1)
+                display.text(f"G: {gyro[0]:.1f} {gyro[1]:.1f} {gyro[2]:.1f} d/s", 5, data_y + 9, 1)
+                display.text(f"H: {heading:.1f} deg", 5, data_y + 18, 1)
+            
+            if radar_mode:
+                report = hlk_radar.parse_radar_report()
+                if report:
+                    num_targets = 3 if radar_multi else 1
+                    for i in range(0, num_targets * 4, 4):
+                        x, y, speed, res = report[i:i+4]
+                        display.text(f"T{(i//4)+1}: X{x:3.0f} Y{y:3.0f} S{speed:2.0f} R{res:2.0f}", 5, data_y + (i//4)*9, 1)
+                else:
+                    display.text("NO TARGETS", 5, data_y, 1)
+            
+            # === Rolling Log (always shown, below everything) ===
+            for idx, msg in enumerate(log_messages):
+                display.text(msg[:20], 5, log_y + idx * 9, 1)  # truncate to 20 chars to fit screen
         
         display.show()
         
@@ -326,9 +336,15 @@ def main():
                     display.text("Single-Target ON", 20, 50, 1)
                 display.show()
                 time.sleep(1.0)   # quick feedback
+            elif count == 14:  # LOG - toggle log display mode
+                log_mode = not log_mode
+                if log_mode:
+                    imu_mode = False  # turn off other modes when viewing log
+                    radar_mode = False
             else:
                 imu_mode = False
                 radar_mode = False
+                log_mode = False
                 if count == 8:
                     set_distance_mode()
                 else:
