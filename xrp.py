@@ -9,6 +9,7 @@ import utime
 import qwiic_i2c
 import qwiic_joystick
 import collections
+import micropython
 import gc
 from neopixel import NeoPixel
 from XRPRadar import XRPRadar
@@ -16,7 +17,7 @@ from machine import Pin, time_pulse_us
 from RadarFollower import RadarFollower
 from ObstacleAvoider import ObstacleAvoider
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 i2c = machine.I2C(0, sda=machine.Pin(4), scl=machine.Pin(5), freq=400000)
 qwiic_driver = qwiic_i2c.get_i2c_driver(sda=4, scl=5, freq=400000)
@@ -33,9 +34,11 @@ last_button_state = False
 hlk_radar = XRPRadar(uart_id=0, tx_pin=18, rx_pin=19, baudrate=256000)
 follower = RadarFollower(drivetrain, hlk_radar, imu=imu)  # optional imu
 avoider = ObstacleAvoider(drivetrain, hlk_radar)
-radar_buffer = ""
 log_messages = collections.deque((),50)
 log_scroll_index = 0
+
+# Recording system
+recording = []
 
 def get_real_volts():
     total = 0
@@ -48,13 +51,8 @@ def get_real_volts():
     return battery_v
 
 def add_log(msg):
-    # 1. Simple duplicate filter to prevent spamming memory
-    if len(log_messages) > 0 and log_messages[-1] == msg[:15]:
-        return
-
     width = 15
     for i in range(0, len(msg), width):
-        # deque automatically discards the oldest item when it hits 50
         log_messages.append(msg[i:i+width])
 
 def set_led_green():
@@ -64,6 +62,74 @@ def set_led_green():
 def set_led_red():
     led[0] = (64, 0, 0)
     led.write()
+
+# Movement primitives for recording
+def straight():
+    safety_drive(0.6, 0.6, 15.0)
+
+def left_arc():
+    safety_drive(0.4, 0.7, 12.0)
+
+def right_arc():
+    safety_drive(0.7, 0.4, 12.0)
+
+def left_point():
+    safety_drive(0, 0.6, 8.0)
+
+def right_point():
+    safety_drive(0.6, 0, 8.0)
+
+def left_turn():
+    safety_drive(-0.5, 0.5, 4.8)
+
+def right_turn():
+    safety_drive(0.5, -0.5, 4.8)
+
+def clockwise_circle():
+    for _ in range(8):
+        safety_drive(0.6, 0.6, 6.0)
+        safety_drive(-0.5, 0.5, 2.4)
+
+def counterclockwise_circle():
+    for _ in range(8):
+        safety_drive(0.6, 0.6, 6.0)
+        safety_drive(0.5, -0.5, 2.4)
+
+def clockwise_square():
+    for _ in range(4):
+        safety_drive(0.6, 0.6, 10.0)
+        safety_drive(-0.5, 0.5, 4.8)
+
+def counterclockwise_square():
+    for _ in range(4):
+        safety_drive(0.6, 0.6, 10.0)
+        safety_drive(0.5, -0.5, 4.8)
+
+def clockwise_polygon():
+    for _ in range(8):
+        safety_drive(0.6, 0.6, 6.0)
+        safety_drive(-0.5, 0.5, 2.4)
+
+def counterclockwise_polygon():
+    for _ in range(8):
+        safety_drive(0.6, 0.6, 6.0)
+        safety_drive(0.5, -0.5, 2.4)
+
+primitives = {
+    "STRAIGHT": straight,
+    "LEFT_ARC": left_arc,
+    "RIGHT_ARC": right_arc,
+    "LEFT_POINT": left_point,
+    "RIGHT_POINT": right_point,
+    "LEFT_TURN": left_turn,
+    "RIGHT_TURN": right_turn,
+    "CLOCK_CIRCLE": clockwise_circle,
+    "COUNTER_CIRCLE": counterclockwise_circle,
+    "CLOCK_SQUARE": clockwise_square,
+    "COUNTER_SQUARE": counterclockwise_square,
+    "CLOCK_POLYGON": clockwise_polygon,
+    "COUNTER_POLYGON": counterclockwise_polygon,
+}
 
 def error_routine(error_msg, e=None):
     """
@@ -82,14 +148,12 @@ def error_routine(error_msg, e=None):
     add_log(f"ERR: {error_msg}")
     
     # 3. Capture and Log Stack Trace if 'e' is provided
-    if e is not None:
+    if e:
+        import sys, io
         buf = io.StringIO()
         sys.print_exception(e, buf)
-        trace_text = buf.getvalue()
-        # Wrap and add each line of the trace to the log
-        for line in trace_text.split('\n'):
-            if line.strip():
-                add_log(line.strip())
+        for line in buf.getvalue().split('\n'):
+            if line.strip(): add_log(line.strip())
             
     # 4. Print to console for REPL debugging
     print(f"ERROR: {error_msg}")
@@ -98,8 +162,10 @@ def error_routine(error_msg, e=None):
     # 5. Lock the display on the log so the user can scroll/see it
     # Note: This will exit the program
     display.fill(0)
-    # Show last 14 lines of the updated log
-    for i, msg in enumerate(log_messages[-14:]): 
+    num_logs = len(log_messages)
+    start_idx = max(0, num_logs - 14)
+    for i in range(min(14, num_logs)):
+        msg = log_messages[start_idx + i]
         display.text(msg, 0, i * 9, 1)
     display.show()
     raise SystemExit(f"Exiting: {error_msg}")
@@ -200,13 +266,36 @@ def safety_drive(left_eff, right_eff, target_distance):
 
 def get_radar_report():
     report = hlk_radar.parse_radar_report()   # use the new radar
-    if report:
-        for i in range(0, len(report), 4):
-            x, y, speed, res = report[i:i+4]
-            display.text(f"T{i//4+1}: X{x:3} Y{y:3} S{speed:2} R{res}", 5, 103 + (i//4)*9, 1)
+    if not report:
+        return(65535)
+    min_dist_sq = 4225000000 # 6500 * 2 for sqrt avoidance
+    found = False
+    
+    for i in range(0, len(report), 4):
+        x, y, speed, res = report[i:i+4]
+        display.text(f"T{i//4+1}: X{x:3} Y{y:3} S{speed:2} R{res}", 5, 103 + (i//4)*9, 1)
         display.show()
         return True
     return False
+
+def set_multi_target(self, enable=True):
+    """
+    Toggles between multi-target and single-target tracking.
+    """
+    # 1. Enter Configuration Mode
+    self.ser.write(b'\xFD\xFC\xFB\xFA\x04\x00\xFF\x00\x01\x00')
+    time.sleep(0.1)
+    
+    # 2. Set Tracking Mode (0x00 for Single, 0x01 for Multi)
+    mode = b'\x01' if enable else b'\x00'
+    # Command: Header + Length + Command(0x0080) + Mode + Tail
+    cmd = b'\xFD\xFC\xFB\xFA\x02\x00\x80\x00' + mode + b'\x04\x03\x02\x01'
+    self.ser.write(cmd)
+    time.sleep(0.1)
+    
+    # 3. Exit Configuration Mode
+    self.ser.write(b'\xFD\xFC\xFB\xFA\x02\x00\xFE\x00\x04\x03\x02\x01')
+    add_log(f"Radar: {'Multi' if enable else 'Single'}")
 
 def run_joystick_control():
     """Directly control the XRP drivetrain using the Qwiic Joystick."""
@@ -258,6 +347,49 @@ def run_joystick_control():
 
         time.sleep(0.05)
 
+def record_movement():
+    global recording
+    recording = []
+    primitive_names = list(primitives.keys())
+    last_press_time = 0
+    local_last_button_state = last_button_state
+
+    add_log("Recording started")
+
+    while True:
+        pos = seesaw_device.get_position()
+        idx = pos % len(primitive_names)
+
+        display.fill(0)
+        display.text("RECORD MODE", 15, 10, 1)
+        display.text(f"Select: {primitive_names[idx]}", 5, 30, 1)
+        display.text("Button: Add | Double: End", 5, 50, 1)
+        display.show()
+
+        try:
+            btn = seesaw_device.get_button()
+        except Exception as e:
+            error_routine("Failed to read button in record", f"Exception: {e}")
+
+        if btn and not local_last_button_state:
+            current_time = time.ticks_ms()
+            if time.ticks_diff(current_time, last_press_time) < 500:  # double-click
+                add_log("Recording ended")
+                break
+            last_press_time = current_time
+            recording.append(primitive_names[idx])
+            add_log(f"Added {primitive_names[idx]}")
+
+        local_last_button_state = btn
+        time.sleep(0.02)
+
+def playback_movement():
+    add_log("Playback started")
+    for prim in recording:
+        primitives[prim]()
+        time.sleep(0.1)  # small pause between primitives
+    add_log("Playback ended")
+
 def run_program(index):
     try:
         try: seesaw_device.set_led(64, 0, 0) # Red for Driving
@@ -269,39 +401,26 @@ def run_program(index):
         display.show()
 
         # Program Menu Logic
-        if index == 0: safety_drive(0.6, 0.6, 15.0)
-        elif index == 1: safety_drive(0.4, 0.7, 12.0)
-        elif index == 2: safety_drive(-0.5, 0.5, 5.0)
-        elif index == 3: safety_drive(0, 0.6, 8.0)
-        elif index == 4: safety_drive(0.5, 0.8, 40.0)
-        elif index == 5: # Square
-            for _ in range(4):
-                safety_drive(0.6, 0.6, 10.0)
-                safety_drive(-0.5, 0.5, 4.8)
-        elif index == 6: # Circle-ish
-            for _ in range(8):
-                safety_drive(0.6, 0.6, 6.0)
-                safety_drive(-0.5, 0.5, 2.4)
-        elif index == 7: # Out and Back
+        if index == 0: # TEST - out and back
             safety_drive(0.7, 0.7, 8.0)
             time.sleep(0.5)
             safety_drive(-0.7, -0.7, -8.0)
-        elif index == 10:  # FOLLOW
+        elif index == 3:  # FOLLOW
             try:
                 follower.run()
             except Exception as e:
                 error_routine("Follower run failed", f"Exception: {e}")
-        elif index == 11:  # AVOID
+        elif index == 4:  # AVOID
             try:
                 avoider.run()
             except Exception as e:
                 error_routine("Avoider run failed", f"Exception: {e}")
-        elif index == 12:  # JOYSTICK (The new index for JOYSTICK)
+        elif index == 5:  # JOYSTICK
             run_joystick_control()
-        elif index == 13:  # IMU - perhaps add something
-            pass
-        elif index == 14:  # LOG - perhaps add something
-            pass
+        elif index == 8:  # RECORD
+            record_movement()
+        elif index == 9:  # PLAYBACK
+            playback_movement()
         
         try: seesaw_device.set_led(0, 64, 0) # Green for Idle
         except Exception as e:
@@ -345,6 +464,12 @@ def main():
     radar_multi = True
     log_mode = False  # new log display toggle
     log_messages = []
+#    last_mem_check = time.ticks_ms()
+    last_slow_update = 0
+    batt_str = "0.00V"
+    radar_str = "Multi"
+
+    
     add_log(f"XRP System v{VERSION} starting")
     try:
         imu.calibrate()
@@ -353,6 +478,8 @@ def main():
         error_routine("IMU calibration failed", f"Exception: {e}")
     try:
         hlk_radar.multi_target_tracking()
+        time.sleep(0.1)
+        hlk_radar.poll_for_response() # This consumes and "discards" the OK
         add_log("Radar initialized to multi-target")
     except Exception as e:
         error_routine("Radar initialization failed", f"Exception: {e}, radar_multi={radar_multi}")
@@ -368,9 +495,24 @@ def main():
     except: pass
     set_led_green()  # System running indicator
 
-    menus = ["STRAIGHT", "ARC", "POINT", "SWING", "CIRCLE", "SQUARE", "POLYGON", "TEST", "SET LIMIT", "HLK-LD2450", "FOLLOW", "AVOID", "JOYSTICK", "IMU", "LOG"]
+    menus = ["TEST", "SET LIMIT", "HLK-LD2450", "FOLLOW", "AVOID", "JOYSTICK", "IMU", "LOG", "RECORD", "PLAYBACK"]
 
     while True:
+        gc.collect()
+        
+#        current_time = time.ticks_ms()
+#        if time.ticks_diff(current_time, last_mem_check) > 10000: # 10 seconds
+#            allocated = gc.mem_alloc()
+#            free = gc.mem_free()
+#            total = allocated + free
+#            # Safely output the f-string to the console
+#            print(f"--- MEMORY CHECK ---")
+#            print(f"Allocated: {allocated} bytes")
+#            print(f"Free:      {free} bytes")
+#            print(f"Usage:     {(allocated/total)*100:.1f}%")
+#            add_log(f"Mem: {allocated//1024}K")
+#            last_mem_check = current_time
+        
         try:
             current_dist = get_radar_distance()
             pos = seesaw_device.get_position()
@@ -399,15 +541,21 @@ def main():
                 display.fill(0)
                 display.text("XRP DASHBOARD", 15, 4, 1)
                 display.hline(0, 14, 128, 1)
-                display.text(f"MODE: {menus[count]}", 5, 28, 1)
-                display.text(f"BATT: {get_real_volts():.2f}V", 5, 44, 1)
-                display.text(f"RADAR: {'Multi' if radar_multi else 'Single'}", 5, 54, 1)  # moved down
+                display.text(f"RADAR: {'Multi' if radar_multi else 'Single'}", 5, 54, 1)
+                now = time.ticks_ms()
+                if time.ticks_diff(now, last_slow_update) > 1000:
+                    batt_str = f"{get_real_volts():.2f}V"
+                    radar_str = "Multi" if radar_multi else "Single"
+                    last_slow_update = now
+                if not log_mode:
+                    display.text(f"BATT: {batt_str}", 5, 44, 1)
+                    display.text(f"RADAR: {radar_str}", 5, 54, 1)
 
                 # Current distance readout
                 if current_dist >= 65500:
-                    display.text("DIST: NO SENSOR", 5, 64, 1)  # moved down
+                    display.text("DIST: NO SENSOR", 5, 64, 1)
                 else:
-                    display.text(f"DIST: {int(current_dist)}cm", 5, 64, 1)  # moved down
+                    display.text(f"DIST: {int(current_dist)}cm", 5, 64, 1)
 
                 # === Distance bar + IMU / Radar + LOG ===
                 if imu_mode or radar_mode:
@@ -441,7 +589,7 @@ def main():
 
                 # === Rolling Log (always shown, below everything) ===
                 for idx, msg in enumerate(log_messages):
-                    display.text(msg[:20], 5, log_y + idx * 9, 1)  # truncate to 20 chars to fit screen
+                    display.text(msg[:14], 5, log_y + idx * 9, 1)  # truncate to 14 characters to fit screen
 
             display.show()
         except Exception as e:
@@ -454,7 +602,7 @@ def main():
 
         if btn and not last_button_state:
             time.sleep(0.1) # Debounce
-            if count == 13:   # IMU - toggle display modes
+            if count == 6:   # IMU - toggle display modes
                 if not imu_mode and not radar_mode:
                     imu_mode = True
                 elif imu_mode:
@@ -462,10 +610,13 @@ def main():
                     radar_mode = True
                 elif radar_mode:
                     radar_mode = False
-            elif count == 9:   # HLK-LD2450
+            elif count == 2:   # HLK-LD2450
+                radar_multi = not radar_multi
+                hlk_radar.set_multi_target(radar_multi)
                 radar_mode = True
                 imu_mode = False
-            elif count == 14:  # LOG - toggle log display mode
+                add_log(f"Mode -> {'Multi' if radar_multi else 'Single'}")
+            elif count == 7:  # LOG - toggle log display mode
                 log_mode = not log_mode
                 if log_mode:
                     imu_mode = False  # turn off other modes when viewing log
@@ -473,7 +624,7 @@ def main():
             else:
                 imu_mode = False
                 radar_mode = False
-                if count == 8:
+                if count == 1:  # SET LIMIT
                     set_distance_mode()
                 else:
                     run_program(count)
@@ -481,8 +632,7 @@ def main():
         last_button_state = btn
         time.sleep(0.02)
 
-        radar_buffer = hlk_radar.poll_for_response()
-        gc.collect()
+        hlk_radar.poll_for_response()
 
 # Entry point
 if __name__ == "__main__":
@@ -505,4 +655,4 @@ if __name__ == "__main__":
         for line in trace_text.split('\n'):
             add_log(line)
             
-        error_routine("Crash detected")
+        error_routine("Crash detected", e)
