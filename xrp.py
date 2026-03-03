@@ -361,9 +361,10 @@ def record_movement():
         idx = pos % len(primitive_names)
 
         display.fill(0)
-        display.text("RECORD MODE", 15, 10, 1)
+        display.text("RECORD MODE", 5, 10, 1)
         display.text(f"Select: {primitive_names[idx]}", 5, 30, 1)
-        display.text("Button: Add | Double: End", 5, 50, 1)
+        display.text("Btn: Add", 5, 50, 1)
+        display.text("Dbl-Click: End", 5, 70, 1)
         display.show()
 
         try:
