@@ -13,26 +13,54 @@ class XRPRadar:
     def __init__(self, uart_id, tx_pin, rx_pin, baudrate=256000):
         """Initializes the UART and persistent buffer."""
         self.ser = UART(uart_id, baudrate=baudrate, tx=Pin(tx_pin), rx=Pin(rx_pin))
-        self.buffer = b""
+        self.buffer = bytearray(512) 
+        self.buffer_idx = 0
+        self.buffer_len = 0
 
     def poll_for_response(self):
         """
-        Reads available UART data into the buffer.
-        Returns the full response if COMMAND_TAIL is found, else None.
+        Memory-safe version using a static bytearray buffer.
+        Finds COMMAND_TAIL without creating new objects.
         """
         if self.ser.any():
-            chunk = self.ser.read()
-            if chunk:
-                self.buffer += chunk
-        
-        if self.COMMAND_TAIL in self.buffer:
-            # Extract the full command packet up to the tail
-            parts = self.buffer.split(self.COMMAND_TAIL, 1)
-            full_response = parts[0] + self.COMMAND_TAIL
-            self.buffer = parts[1]  # Keep any trailing data (like report frames)
-            return full_response
-        return None
+            num_bytes = self.ser.any()
+            # Ensure we don't overflow our static buffer
+            if self.buffer_len + num_bytes < len(self.buffer):
+                # Read directly into the existing bytearray offset
+                self.ser.readinto(memoryview(self.buffer)[self.buffer_len : self.buffer_len + num_bytes])
+                self.buffer_len += num_bytes
+            else:
+                # If buffer is full, clear it to prevent a hang/leak
+                self.buffer_len = 0
 
+        # Search the populated area of the bytearray directly.
+        # We use a slice of the bytearray. In MicroPython, searching a 
+        # bytearray slice is efficient and does not require .tobytes()
+        try:
+            # We search only up to the current buffer_len
+            current_data = self.buffer[:self.buffer_len]
+            tail_idx = current_data.find(self.COMMAND_TAIL)
+        except Exception:
+            tail_idx = -1
+    
+        if tail_idx != -1:
+            end_of_tail = tail_idx + len(self.COMMAND_TAIL)
+            
+            # Create the response string only once to return it
+            full_response = bytes(self.buffer[:end_of_tail])
+            
+            # Shift trailing data to the front of the buffer (in-place)
+            remaining_len = self.buffer_len - end_of_tail
+            if remaining_len > 0:
+                self.buffer[:remaining_len] = self.buffer[end_of_tail : self.buffer_len]
+                self.buffer_len = remaining_len
+            else:
+                self.buffer_len = 0
+                
+            return full_response
+            
+        return None
+        
     def _send_command(self, intra_frame_length, command_word, command_value):
         """Constructs and sends a command frame."""
         command = self.COMMAND_HEADER + intra_frame_length + command_word + command_value + self.COMMAND_TAIL
