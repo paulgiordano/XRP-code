@@ -116,19 +116,19 @@ def counterclockwise_polygon():
         safety_drive(0.5, -0.5, 2.4)
 
 primitives = {
-    "STRAIGHT": straight,
-    "LEFT_ARC": left_arc,
-    "RIGHT_ARC": right_arc,
-    "LEFT_POINT": left_point,
-    "RIGHT_POINT": right_point,
-    "LEFT_TURN": left_turn,
-    "RIGHT_TURN": right_turn,
-    "CLOCK_CIRCLE": clockwise_circle,
-    "COUNTER_CIRCLE": counterclockwise_circle,
-    "CLOCK_SQUARE": clockwise_square,
-    "COUNTER_SQUARE": counterclockwise_square,
-    "CLOCK_POLYGON": clockwise_polygon,
-    "COUNTER_POLYGON": counterclockwise_polygon,
+    "STR": straight,
+    "L_ARC": left_arc,
+    "R_ARC": right_arc,
+    "L_PNT": left_point,
+    "R_PNT": right_point,
+    "L_TRN": left_turn,
+    "R_TRN": right_turn,
+    "CLK_CIR": clockwise_circle,
+    "CTR_CIR": counterclockwise_circle,
+    "CLK_SQR": clockwise_square,
+    "CTR_SQR": counterclockwise_square,
+    "CLK_POL": clockwise_polygon,
+    "CTR_POL": counterclockwise_polygon,
 }
 
 def error_routine(error_msg, e=None):
