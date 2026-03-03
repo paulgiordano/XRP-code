@@ -541,6 +541,7 @@ def main():
                 display.fill(0)
                 display.text("XRP DASHBOARD", 15, 4, 1)
                 display.hline(0, 14, 128, 1)
+                display.text(f"MODE: {menus[count]}", 5, 24, 1)
                 display.text(f"RADAR: {'Multi' if radar_multi else 'Single'}", 5, 54, 1)
                 now = time.ticks_ms()
                 if time.ticks_diff(now, last_slow_update) > 1000:
@@ -649,10 +650,10 @@ if __name__ == "__main__":
         import io
         buf = io.StringIO()
         sys.print_exception(e, buf)
-        trace_text = buf.getvalue()
+        stack_trace = buf.getvalue()
         
         # Log each line of the trace (wrapped to 15 chars)
-        for line in trace_text.split('\n'):
+        for line in stack_trace.split('\n'):
             add_log(line)
             
         error_routine("Crash detected", e)
